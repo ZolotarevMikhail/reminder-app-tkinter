@@ -1,0 +1,3 @@
+# База данных и кэш не попадают в git
+reminders.db
+__pycache__/
