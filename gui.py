@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Графический интерфейс напоминалки (tkinter)."""
+"""Графический интерфейс напоминалки (tkinter).
+
+Главное окно: форма добавления, таблица с цветами по статусу и
+уведомления, приходящие из фонового потока notifications.
+"""
 
 import queue
 import tkinter as tk
@@ -10,6 +14,18 @@ from database import ReminderDatabase, ALL_STATUSES
 from notifications import NotificationChecker
 
 DATE_FORMAT = "%Y-%m-%d %H:%M"
+
+# Заголовок окна приложения (используется и в диалогах)
+APP_TITLE = "Напоминалка"
+
+# Подсказка внизу окна, когда строка ещё не выбрана
+HINT_NO_SELECTION = ("Кликните по строке в списке, "
+                     "затем нажмите кнопку действия")
+
+# Цвет выделенной строки и «тихой» подсказки
+HINT_COLOR = "#888888"
+HINT_SELECTED_COLOR = "#333333"
+HINT_ERROR_COLOR = "#c0392b"
 
 # Быстрая установка времени: подпись кнопки -> сколько минут добавить
 QUICK_BUTTONS = [("Через 1 мин", 1), ("Через 5 мин", 5), ("Через 15 мин", 15),
@@ -24,6 +40,17 @@ ROW_COLORS = {
     "Просрочено": "#fadbd8",
     "Отменено": "#e6e6e6",
 }
+
+# Колонки таблицы: (ключ, заголовок, ширина)
+COLUMNS = (
+    ("id", "ID", 40),
+    ("title", "Заголовок", 150),
+    ("description", "Описание", 190),
+    ("remind_at", "Дата/Время", 115),
+    ("status", "Статус", 90),
+    ("repeat", "Повтор", 85),
+    ("created_at", "Создано", 115),
+)
 
 
 class ReminderApp:
@@ -51,10 +78,16 @@ class ReminderApp:
     # ---------- построение интерфейса ----------
 
     def _build_ui(self):
-        tk.Label(self.root, text="Напоминалка",
+        """Собирает все блоки главного окна."""
+        tk.Label(self.root, text=APP_TITLE,
                  font=("Arial", 16, "bold")).pack(pady=(10, 4))
+        self._build_form()
+        self._build_filter_row()
+        self._build_table()
+        self._build_actions()
 
-        # --- форма добавления ---
+    def _build_form(self):
+        """Форма добавления нового напоминания."""
         form = tk.LabelFrame(self.root, text=" Добавить новое напоминание ")
         form.pack(fill="x", padx=12, pady=6)
 
@@ -96,34 +129,34 @@ class ReminderApp:
 
         form.columnconfigure(1, weight=1)
 
-        # --- строка фильтра ---
+    def _build_filter_row(self):
+        """Строка фильтра по статусу и кнопки обновления."""
         filter_row = tk.Frame(self.root)
         filter_row.pack(fill="x", padx=12, pady=4)
         tk.Label(filter_row, text="Фильтр по статусу:").pack(side="left")
         self.filter_var = tk.StringVar(value="Все")
         tk.OptionMenu(filter_row, self.filter_var, "Все", *ALL_STATUSES,
-                      command=lambda v: self.refresh()).pack(side="left", padx=6)
+                      command=lambda v: self.refresh()).pack(side="left",
+                                                             padx=6)
         tk.Button(filter_row, text="Обновить",
                   command=self.refresh).pack(side="left", padx=6)
         self.label_counts = tk.Label(filter_row, text="")
         self.label_counts.pack(side="right")
 
-        # --- таблица напоминаний ---
+    def _build_table(self):
+        """Таблица напоминаний (с прокруткой и цветами статусов)."""
         table = tk.LabelFrame(self.root, text=" Список напоминаний ")
         table.pack(fill="both", expand=True, padx=12, pady=6)
 
-        columns = ("id", "title", "description", "remind_at", "status", "repeat", "created_at")
-        self.tree = ttk.Treeview(table, columns=columns, show="headings")
-        headers = {"id": "ID", "title": "Заголовок", "description": "Описание",
-                   "remind_at": "Дата/Время", "status": "Статус",
-                   "repeat": "Повтор", "created_at": "Создано"}
-        widths = {"id": 40, "title": 150, "description": 190,
-                  "remind_at": 115, "status": 90, "repeat": 85, "created_at": 115}
-        for col in columns:
-            self.tree.heading(col, text=headers[col])
-            self.tree.column(col, width=widths[col],
-                             anchor="w" if col in ("title", "description") else "center")
-        scroll = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
+        column_names = [col for col, _, _ in COLUMNS]
+        self.tree = ttk.Treeview(table, columns=column_names,
+                                 show="headings")
+        for col, header, width in COLUMNS:
+            self.tree.heading(col, text=header)
+            anchor = "w" if col in ("title", "description") else "center"
+            self.tree.column(col, width=width, anchor=anchor)
+        scroll = ttk.Scrollbar(table, orient="vertical",
+                               command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.pack(side="left", fill="both", expand=True, pady=(4, 0))
         scroll.pack(side="right", fill="y")
@@ -131,22 +164,24 @@ class ReminderApp:
         for status, color in ROW_COLORS.items():
             self.tree.tag_configure(status, background=color)
 
-        # --- кнопки действий ---
+        # Подсказка и строка «что выбрано» — видимый отклик на клики
+        self.label_selected = tk.Label(self.root, text=HINT_NO_SELECTION,
+                                       fg=HINT_COLOR)
+        self.label_selected.pack(pady=(0, 8))
+        self.tree.bind("<<TreeviewSelect>>", self._on_select)
+
+    def _build_actions(self):
+        """Ряд кнопок действий над выбранной строкой."""
         actions = tk.Frame(self.root)
         actions.pack(pady=6)
         tk.Button(actions, text="Отметить «Готово»", width=20,
-                  command=lambda: self._change_status("Готово")).pack(side="left", padx=6)
+                  command=lambda: self._change_status(
+                      "Готово")).pack(side="left", padx=6)
         tk.Button(actions, text="Отметить «Отменено»", width=20,
-                  command=lambda: self._change_status("Отменено")).pack(side="left", padx=6)
+                  command=lambda: self._change_status(
+                      "Отменено")).pack(side="left", padx=6)
         tk.Button(actions, text="Удалить напоминание", width=20,
                   command=self.delete_reminder).pack(side="left", padx=6)
-
-        # Подсказка и строка «что выбрано» — видимый отклик на клики
-        self.label_selected = tk.Label(self.root, text=(
-            "Кликните по строке в списке, затем нажмите кнопку действия"),
-            fg="#888888")
-        self.label_selected.pack(pady=(0, 8))
-        self.tree.bind("<<TreeviewSelect>>", self._on_select)
 
     # ---------- действия ----------
 
@@ -161,14 +196,15 @@ class ReminderApp:
         description = self.entry_desc.get().strip()
         date_text = self.entry_date.get().strip()
         if not title:
-            messagebox.showwarning("Напоминалка", "Введите заголовок.")
+            messagebox.showwarning(APP_TITLE, "Введите заголовок.")
             return
         try:
             moment = datetime.strptime(date_text, DATE_FORMAT)
         except ValueError:
             messagebox.showwarning(
-                "Напоминалка",
-                f"Неверный формат даты. Нужен: ГГГГ-ММ-ДД ЧЧ:ММ\nПример: 2026-09-27 15:30")
+                APP_TITLE,
+                "Неверный формат даты. Нужен: ГГГГ-ММ-ДД ЧЧ:ММ\n"
+                "Пример: 2026-09-27 15:30")
             return
         self.db.add(title, description, moment.strftime(DATE_FORMAT),
                     self.repeat_var.get())
@@ -182,24 +218,25 @@ class ReminderApp:
             # Не диалог, а надпись в окне — чтобы сообщение точно было видно
             self.label_selected.config(
                 text="Сначала выберите строку в списке — кликните по ней",
-                fg="#c0392b")
+                fg=HINT_ERROR_COLOR)
             return None
         return int(self.tree.item(selected[0])["values"][0])
 
     def _on_select(self, event=None):
-        """Делает выделение видимым: у выбранной строки цвет меняется на синий."""
+        """Делает выделение видимым: у выбранной строки цвет меняется."""
         selected = set(self.tree.selection())
         for iid in self.tree.get_children():
             status = self.tree.set(iid, "status")
-            self.tree.item(iid, tags=() if iid in selected else (status,))
+            self.tree.item(
+                iid, tags=() if iid in selected else (status,))
         if selected:
             values = self.tree.item(list(selected)[0])["values"]
             self.label_selected.config(
-                text=f"Выбрано: №{values[0]} «{values[1]}»", fg="#333333")
+                text=f"Выбрано: №{values[0]} «{values[1]}»",
+                fg=HINT_SELECTED_COLOR)
         else:
-            self.label_selected.config(text=(
-                "Кликните по строке в списке, затем нажмите кнопку действия"),
-                fg="#888888")
+            self.label_selected.config(text=HINT_NO_SELECTION,
+                                       fg=HINT_COLOR)
 
     def _change_status(self, status):
         reminder_id = self._selected_id()
@@ -211,14 +248,17 @@ class ReminderApp:
         reminder_id = self._selected_id()
         if reminder_id is None:
             return
-        if messagebox.askyesno("Напоминалка", "Удалить выбранное напоминание?"):
+        if messagebox.askyesno(APP_TITLE,
+                               "Удалить выбранное напоминание?"):
             self.db.delete(reminder_id)
             self.refresh()
 
     def test_notification(self):
         self.show_popup({"title": "Тест уведомления",
-                         "description": "Если вы видите это окно — уведомления работают.",
-                         "remind_at": datetime.now().strftime(DATE_FORMAT)})
+                         "description": "Если вы видите это окно — "
+                                        "уведомления работают.",
+                         "remind_at":
+                             datetime.now().strftime(DATE_FORMAT)})
 
     # ---------- таблица и уведомления ----------
 
@@ -253,7 +293,8 @@ class ReminderApp:
         popup = tk.Toplevel(self.root)
         popup.title("Напоминание")
         popup.attributes("-topmost", True)
-        popup.geometry(f"+{self.root.winfo_x() + 250}+{self.root.winfo_y() + 150}")
+        popup.geometry(
+            f"+{self.root.winfo_x() + 250}+{self.root.winfo_y() + 150}")
         tk.Label(popup, text="⏰ " + reminder["title"],
                  font=("Arial", 13, "bold")).pack(padx=20, pady=(14, 6))
         if reminder.get("description"):
